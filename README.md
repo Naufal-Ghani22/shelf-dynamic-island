@@ -10,6 +10,7 @@ Single `.exe`, no install, no dependencies (uses the .NET Framework already buil
 - **Clipboard capture**: every copied image is saved automatically:
   - images copied from a browser, Figma, Photoshop, screenshots (`Win+Shift+S`), etc. → saved as PNG in `%APPDATA%\ShelfIsland\clips\`
   - image files copied in Explorer (`.png .jpg .gif .webp .svg …`) → added to the shelf
+  - **spreadsheets**: pictures/charts copied from Excel (PNG, bitmap or EMF), and "image in cell" pictures from Google Sheets (downloaded from the copied HTML) and Excel Place in Cell (read from Excel's temp clip files). Plain cell ranges without images are ignored.
   - duplicates copied back-to-back are stored once
 - **Drag out**: drag one row to take one file, or drag from **⇱ Semua** / the header to take everything at once.
 - **Manage**: `×` on a row removes it, **Kosongkan** clears the shelf. The shelf persists across restarts.
@@ -22,6 +23,12 @@ Single `.exe`, no install, no dependencies (uses the .NET Framework already buil
 3. (Optional) Right-click the tray icon → **Jalankan saat Windows start**.
 
 If SmartScreen warns about an unknown app, click **More info → Run anyway** (the exe is unsigned).
+
+## Update
+
+1. Right-click the tray icon → **Keluar**.
+2. Download the new `ShelfIsland.exe` and replace the old file in the same location (so the startup entry keeps working).
+3. Run it again. The shelf contents are kept.
 
 ## Build from source
 
