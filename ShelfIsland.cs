@@ -64,39 +64,130 @@ class Island : Form
     {
         try
         {
-            int before = files.Count;
-            if (Clipboard.ContainsFileDropList())
+            var data = Clipboard.GetDataObject();
+            if (data == null) return;
+            var fmts = data.GetFormats();
+            // Excel/Sheets cell ranges also carry a picture of the cells; only take real images.
+            bool isCells = fmts.Contains("Csv") || fmts.Contains("XML Spreadsheet") || fmts.Contains("Link");
+
+            if (data.GetDataPresent(DataFormats.FileDrop))
             {
                 // Ctrl+C on image files in Explorer
-                foreach (var f in Clipboard.GetFileDropList())
+                int before = files.Count;
+                foreach (var f in (string[])data.GetData(DataFormats.FileDrop))
                     if (ImgExt.Contains(Path.GetExtension(f).ToLowerInvariant()) && !files.Contains(f, StringComparer.OrdinalIgnoreCase)) files.Add(f);
+                if (files.Count > before) Added();
+                return;
             }
-            else if (Clipboard.ContainsImage())
+
+            if (!isCells)
             {
-                // Ctrl+C on an image in a browser, screenshot (Win+Shift+S), Figma, etc.
-                using (var img = Clipboard.GetImage())
-                using (var ms = new MemoryStream())
+                // Excel/Office/Chrome put a lossless "PNG" stream; prefer it over the bitmap.
+                var png = data.GetData("PNG") as MemoryStream;
+                if (png != null) { AddImageBytes(png.ToArray()); return; }
+                if (data.GetDataPresent(DataFormats.Bitmap))
                 {
-                    if (img == null) return;
-                    img.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-                    var bytes = ms.ToArray();
-                    string hash;
-                    using (var md5 = System.Security.Cryptography.MD5.Create()) hash = BitConverter.ToString(md5.ComputeHash(bytes));
-                    if (hash == lastClipHash) return; // apps often fire the event twice
-                    lastClipHash = hash;
-                    var dir = Path.Combine(Path.GetDirectoryName(store), "clips");
-                    Directory.CreateDirectory(dir);
-                    var path = Path.Combine(dir, "clip_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".png");
-                    File.WriteAllBytes(path, bytes);
-                    files.Add(path);
+                    using (var img = data.GetData(DataFormats.Bitmap) as Image)
+                        if (img != null) { AddImage(img); return; }
                 }
+                using (var emf = GetClipboardEmf())
+                    if (emf != null) { AddImage(emf); return; }
             }
-            if (files.Count > before)
+
+            // Google Sheets (and cells with images in Excel Online) only give HTML with <img> tags.
+            if (data.GetDataPresent(DataFormats.Html))
             {
-                Save(); justAdded = true; flash.Stop(); flash.Start(); Invalidate();
+                var html = data.GetData(DataFormats.Html) as string;
+                var srcs = System.Text.RegularExpressions.Regex.Matches(html ?? "", "<img[^>]+src=[\"']([^\"']+)[\"']", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                    .Cast<System.Text.RegularExpressions.Match>().Select(m => System.Net.WebUtility.HtmlDecode(m.Groups[1].Value)).Distinct().ToList();
+                foreach (var src in srcs) FetchImage(src);
             }
         }
         catch { } // clipboard can be locked by another app; skip silently
+    }
+
+    void FetchImage(string src)
+    {
+        if (src.StartsWith("data:image", StringComparison.OrdinalIgnoreCase))
+        {
+            int c = src.IndexOf(','); if (c > 0) AddImageBytes(Convert.FromBase64String(src.Substring(c + 1)));
+            return;
+        }
+        if (src.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+        {
+            // Excel desktop "Place in Cell" images: HTML points at temp files in %TEMP%\msohtmlclip*
+            try { var local = new Uri(src).LocalPath; if (File.Exists(local)) AddImageBytes(File.ReadAllBytes(local)); } catch { }
+            return;
+        }
+        if (src.StartsWith("//")) src = "https:" + src;
+        if (!src.StartsWith("http", StringComparison.OrdinalIgnoreCase)) return;
+        System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
+                using (var wc = new System.Net.WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "Mozilla/5.0");
+                    var bytes = wc.DownloadData(src);
+                    BeginInvoke(new Action(() => AddImageBytes(bytes)));
+                }
+            }
+            catch { }
+        });
+    }
+
+    void AddImage(Image img)
+    {
+        using (var ms = new MemoryStream()) { img.Save(ms, System.Drawing.Imaging.ImageFormat.Png); AddImageBytes(ms.ToArray()); }
+    }
+
+    void AddImageBytes(byte[] bytes)
+    {
+        try
+        {
+            // Normalize anything (jpg/webp-less/gif) to PNG when GDI+ can read it.
+            using (var src = new MemoryStream(bytes))
+            using (var img = Image.FromStream(src))
+            using (var ms = new MemoryStream()) { img.Save(ms, System.Drawing.Imaging.ImageFormat.Png); bytes = ms.ToArray(); }
+        }
+        catch { }
+        string hash;
+        using (var md5 = System.Security.Cryptography.MD5.Create()) hash = BitConverter.ToString(md5.ComputeHash(bytes));
+        if (hash == lastClipHash) return; // apps often fire the event twice
+        lastClipHash = hash;
+        var dir = Path.Combine(Path.GetDirectoryName(store), "clips");
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "clip_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".png");
+        File.WriteAllBytes(path, bytes);
+        files.Add(path);
+        Added();
+    }
+
+    void Added() { Save(); justAdded = true; flash.Stop(); flash.Start(); Invalidate(); }
+
+    [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr h);
+    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint f);
+    [DllImport("user32.dll")] static extern bool IsClipboardFormatAvailable(uint f);
+
+    // Excel pictures/charts are sometimes only offered as an enhanced metafile.
+    Image GetClipboardEmf()
+    {
+        if (!IsClipboardFormatAvailable(14) || !OpenClipboard(Handle)) return null;
+        try
+        {
+            var h = GetClipboardData(14);
+            if (h == IntPtr.Zero) return null;
+            using (var mf = new System.Drawing.Imaging.Metafile(h, false))
+            {
+                var bmp = new Bitmap(Math.Max(1, mf.Width), Math.Max(1, mf.Height));
+                using (var g = Graphics.FromImage(bmp)) { g.Clear(Color.White); g.DrawImage(mf, 0, 0, bmp.Width, bmp.Height); }
+                return bmp;
+            }
+        }
+        catch { return null; }
+        finally { CloseClipboard(); }
     }
 
     public Island()
@@ -331,4 +422,5 @@ class Island : Form
         item.Checked = StartupOn();
     }
 }
+
 
